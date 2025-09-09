@@ -207,5 +207,195 @@ enum pcf85363a_control_bits {
     PCF85363A_RESETS_CPR = BIT(7)
 };
 
+struct pcf85363a_config {
+    struct i2c_dt_spec i2c;
+    struct gpio_dt_spec int_a;
+    struct gpio_dt_spec int_b;
+    uint8_t cof; // CLKOUT frequency
+    bool wakeup_source;
+    uint8_t pm; // Power mode (battery switch-over)
+};
 
+struct pcf85363a_data {
+};
 
+static int pcf85363a_read_regs(const struct device *dev, uint8_t addr, uint8_t *data, size_t len)
+{
+    const struct pcf85363a_config *config = dev->config;
+    uint8_t reg_addr = addr;
+    int err;
+
+    err = i2c_write_dt(&config->i2c, &reg_addr, sizeof(reg_addr));
+    if (err != 0) {
+        LOG_ERR("failed to write reg addr 0x%02x (err %d)", addr, err);
+        return err;
+    }
+
+    err = i2c_read_dt(&config->i2c, data, len);
+    if (err != 0) {
+        LOG_ERR("failed to read reg addr 0x%02x, len %d (err %d)", addr, len, err);
+        return err;
+    }
+
+    return 0;
+}
+
+static int pcf85363a_write_regs(const struct device *dev, uint8_t addr, const uint8_t *data, size_t len)
+{
+    const struct pcf85363a_config *config = dev->config;
+    uint8_t block[1 + len];
+    int err;
+
+    block[0] = addr;
+    memcpy(&block[1], data, len);
+
+    err = i2c_write_dt(&config->i2c, block, sizeof(block));
+    if (err != 0) {
+        LOG_ERR("failed to write reg addr 0x%02x, len %d (err %d)", addr, len, err);
+        return err;
+    }
+
+    return 0;
+}
+
+static int pcf85363a_set_time(const struct device *dev, const struct rtc_time *timeptr)
+{
+    uint8_t regs[7];
+    int err;
+
+    // Stop the clock
+    err = pcf85363a_write_regs(dev, PCF85363A_SECONDS, &(uint8_t){PCF85363A_OSCILLATOR_STOP}, 1);
+    if (err != 0) {
+        return err;
+    }
+
+    // Prepare time data in BCD format
+    regs[0] = bin2bcd(timeptr->tm_sec) & 0x7FU; // Seconds
+    regs[1] = bin2bcd(timeptr->tm_min) & 0x7FU; // Minutes
+    regs[2] = bin2bcd(timeptr->tm_hour) & 0x3FU; // Hours (24-hour format)
+    regs[3] = bin2bcd(timeptr->tm_mday) & 0x3FU; // Days
+    regs[4] = (timeptr->tm_wday % 7) & 0x07U; // Weekdays (0=Sunday)
+    regs[5] = bin2bcd((timeptr->tm_mon + 1)) & 0x1FU; // Months (1-12)
+    regs[6] = bin2bcd(timeptr->tm_year % 100); // Years (00-99)
+
+    // Write time registers
+    err = pcf85363a_write_regs(dev, PCF85363A_SECONDS, regs, sizeof(regs));
+    if (err != 0) {
+        return err;
+    }
+
+    // Start the clock
+    err = pcf85363a_write_regs(dev, PCF85363A_SECONDS, &(uint8_t){0x00U}, 1);
+    if (err != 0) {
+        return err;
+    }
+
+    return 0;
+}
+
+static int pcf85363a_get_time(const struct device *dev, struct rtc_time *timeptr)
+{
+    uint8_t regs[7];
+    int err;
+
+    // Read time registers
+    err = pcf85363a_read_regs(dev, PCF85363A_SECONDS, regs, sizeof(regs));
+    if (err != 0) {
+        return err;
+    }
+
+    if (regs[0] & PCF85363A_OSCILLATOR_STOP) {
+        LOG_WRN("Oscillator stop flag is set, time may be invalid");
+    }
+
+    timeptr->tm_sec = bcd2bin(regs[0] & 0x7FU);
+    timeptr->tm_min = bcd2bin(regs[1] & 0x7FU);
+    timeptr->tm_hour = bcd2bin(regs[2] & 0x3FU);
+    timeptr->tm_mday = bcd2bin(regs[3] & 0x3FU);
+    timeptr->tm_wday = regs[4] & 0x07U;
+    timeptr->tm_mon = bcd2bin(regs[5] & 0x1FU) - 1; // tm_mon is 0-11
+    timeptr->tm_year = bcd2bin(regs[6]) + 2000 - 1900; // tm_year is years since 1900
+
+    timeptr->tm_isdst = -1; // Not supported
+    timeptr->tm_yday = -1; // Not supported
+    timeptr->tm_nsec = 0; // Not supported
+
+    return 0;
+}
+
+static int pcf85363a_init(const struct device *dev)
+{
+    const struct pcf85363a_config *config = dev->config;
+    uint8_t func_reg;
+    int err;
+
+    if (!device_is_ready(config->i2c.bus)) {
+        LOG_ERR("I2C bus %s not ready", config->i2c.bus->name);
+        return -ENODEV;
+    }
+
+    if (config->int_a.port && !device_is_ready(config->int_a.port)) {
+        LOG_ERR("INTA GPIO port %s not ready", config->int_a.port->name);
+        return -ENODEV;
+    }
+
+    if (config->int_b.port && !device_is_ready(config->int_b.port)) {
+        LOG_ERR("INTB GPIO port %s not ready", config->int_b.port->name);
+        return -ENODEV;
+    }
+
+    // Configure INTA pin if defined
+    if (config->int_a.port) {
+        err = gpio_pin_configure_dt(&config->int_a, GPIO_INPUT);
+        if (err != 0) {
+            LOG_ERR("Failed to configure INTA pin");
+            return err;
+        }
+    }
+
+    // Configure INTB pin if defined
+    if (config->int_b.port) {
+        err = gpio_pin_configure_dt(&config->int_b, GPIO_INPUT);
+        if (err != 0) {
+            LOG_ERR("Failed to configure INTB pin");
+            return err;
+        }
+    }
+
+    // Set CLKOUT frequency
+    err = pcf85363a_read_regs(dev, PCF85363A_FUNCTION, &func_reg, 1);
+    if (err != 0) {
+        return err;
+    }
+
+    return 0;
+}
+
+static const struct rtc_driver_api pcf85363a_api = {
+    .set_time = pcf85363a_set_time,
+    .get_time = pcf85363a_get_time,
+    // Alarm and calibration functions can be added here
+};
+
+#define PCF85363A_INIT(inst)                                                \
+    static const struct pcf85363a_config pcf85363a_config_##inst = {        \
+        .i2c = I2C_DT_SPEC_INST_GET(inst),                                 \
+        .int_a = GPIO_DT_SPEC_INST_GET_OR(inst, int_a, {0}),               \
+        .int_b = GPIO_DT_SPEC_INST_GET_OR(inst, int_b, {0}),               \
+        .cof = DT_INST_PROP_OR(inst, cof, 0),                              \
+        .wakeup_source = DT_INST_PROP_OR(inst, wakeup_source, false),      \
+        .pm = DT_INST_PROP_OR(inst, pm, 0),                                \
+    };                                                                     \
+                                                                           \
+    static struct pcf85363a_data pcf85363a_data_##inst;                    \
+                                                                           \
+    DEVICE_DT_INST_DEFINE(inst,                                            \
+                          pcf85363a_init,                                  \
+                          NULL,                                           \
+                          &pcf85363a_data_##inst,                         \
+                          &pcf85363a_config_##inst,                       \
+                          POST_KERNEL,                                    \
+                          CONFIG_RTC_INIT_PRIORITY,                       \
+                          &pcf85363a_api);
+
+DT_INST_FOREACH_STATUS_OKAY(PCF85363A_INIT)
