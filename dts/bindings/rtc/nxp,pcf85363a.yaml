@@ -47,9 +47,9 @@ properties:
   int_a_gpios:
     type: phandle-array
     description: |
-      GPIO connected to the PC85363A INT_A interrupt output. This signal is open-drain, active low.
+      GPIO connected to the PCF85363A INT_A interrupt output. This signal is open-drain, active low.
 
   int_b_gpios:
     type: phandle-array
     description: |
-      GPIO connected to the PC85363A INT_B interrupt output. This signal is open-drain, active low.
+      GPIO connected to the PCF85363A INT_B interrupt output. This signal is open-drain, active low.
