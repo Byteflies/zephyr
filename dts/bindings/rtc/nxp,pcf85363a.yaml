@@ -1,0 +1,55 @@
+# Copyright (c) 2025 Byteflies NV
+# SPDX-License-Identifier: Apache-2.0
+
+description: NXP PCF85363A RTC
+
+compatible: "nxp,pcf85363a"
+
+include:
+  - name: rtc-device.yaml
+  - name: i2c-device.yaml
+  - name: pm.yaml
+    property-allowlist:
+      - wakeup-source
+
+
+properties:
+  cof:
+    type: int
+    default: 32768
+    enum:
+      - 32768
+      - 16384
+      - 8192
+      - 4096
+      - 1024
+      - 32
+      - 1
+      - 0
+    description: |
+      Frequency of the CLKOUT signal in Hertz (Hz). Default is 32768 Hz which corresponds to the
+      reset value of the COF field in the Tmr_CLKOUT_ctrl register of the PCF85363A. Set to 0 to
+      disable the CLKOUT signal (High-Z).
+
+  pm:
+    type: string
+    required: true
+    enum:
+      - standard
+      - direct
+      - disabled
+    description: |
+      Battery switch-over function selection:
+        - standard: The power failure condition happens when VDD < VBAT and VDD < Vth(sw)bat
+        - direct: The power failure condition happens when VDD < VBAT
+        - disabled: Battery switch-over disabled - only one power supply (VDD)
+
+  int_a_gpios:
+    type: phandle-array
+    description: |
+      GPIO connected to the PCF85363A INT_A interrupt output. This signal is open-drain, active low.
+
+  int_b_gpios:
+    type: phandle-array
+    description: |
+      GPIO connected to the PCF85363A INT_B interrupt output. This signal is open-drain, active low.
